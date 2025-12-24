@@ -26,6 +26,41 @@
   #win .btns{ display:flex; gap:10px; justify-content:flex-end; }
   #win button{ cursor:pointer; padding:9px 12px; border-radius:10px; border:1px solid rgba(255,255,255,0.18); background:#1b1b1b; color:#eee; font-weight:600; }
   #win button:hover{ background:#232323; }
+  /* make canvases scale nicely */
+#cv, #pattern{
+  max-width: 100%;
+  height: auto;
+}
+
+/* mobile layout: side panel goes under the game */
+@media (max-width: 900px){
+  body{
+    flex-direction: column;
+    height: auto;
+    min-height: 100vh;
+  }
+
+  #wrap{
+    width: 100%;
+    padding: 10px;
+    box-sizing: border-box;
+  }
+
+  #side{
+    width: 100%;
+    border-left: none;
+    border-top: 2px solid #2a2a2a;
+    padding: 12px 0 18px;
+    align-items: center;
+  }
+
+  #pattern{
+    width: 180px;
+    height: 180px;
+  }
+}
+
+  
 </style>
 </head>
 
