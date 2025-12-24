@@ -26,54 +26,57 @@
   #win .btns{ display:flex; gap:10px; justify-content:flex-end; }
   #win button{ cursor:pointer; padding:9px 12px; border-radius:10px; border:1px solid rgba(255,255,255,0.18); background:#1b1b1b; color:#eee; font-weight:600; }
   #win button:hover{ background:#232323; }
+
   /* make canvases scale nicely */
-#cv, #pattern{
-  max-width: 100%;
-  height: auto;
-}
-
-#cv{ width:100%; max-width:800px; }
-
-
-/* mobile layout: side panel goes under the game */
-@media (max-width: 900px){
-  body{
-    flex-direction: column;
+  #cv, #pattern{
+    max-width: 100%;
     height: auto;
-    min-height: 100vh;
+  }
+  #cv{ width:100%; max-width:800px; }
+
+  /* iOS: stop selection/callout */
+  html, body, #wrap, #side, #hud, canvas{
+    -webkit-user-select: none;
+    user-select: none;
+    -webkit-touch-callout: none;
   }
 
-#wrap{ align-items: flex-start; }
+  /* mobile layout: side panel goes under the game */
+  @media (max-width: 900px){
+    body{
+      flex-direction: column;
+      height: auto;
+      min-height: 100vh;
+    }
 
+    #wrap{
+      align-items: flex-start;
+      width: 100%;
+      padding: 10px;
+      box-sizing: border-box;
+    }
 
-  #wrap{
-    width: 100%;
-    padding: 10px;
-    box-sizing: border-box;
+    #side{
+      width: 100%;
+      border-left: none;
+      border-top: 2px solid #2a2a2a;
+      padding: 8px 0 10px;
+      align-items: center;
+    }
+
+    /* pattern smaller on mobile */
+    #pattern{
+      width: 120px;
+      height: 120px;
+    }
   }
-
-  #side{
-    width: 100%;
-    border-left: none;
-    border-top: 2px solid #2a2a2a;
-    padding: 12px 0 18px;
-    align-items: center;
-  }
-
-  #pattern{
-    width: 180px;
-    height: 180px;
-  }
-}
-
-  
 </style>
 </head>
 
 <body>
   <div id="wrap">
     <div id="hud"></div>
-<canvas id="cv" width="800" height="600" style="touch-action:none;"></canvas>
+    <canvas id="cv" width="800" height="600" style="touch-action:none;"></canvas>
 
     <div id="win">
       <div class="card">
@@ -98,7 +101,6 @@ const EDGE_COL = "#aa7744";
 const EDGE_DIM = "#6a4a2a";
 const JUNCTION_MAX_INNER = 1; // колко токена може да са “вътре” в бариерата около node (реално 1)
 const junctionWinner = new Map(); // nodeId -> tokenId
-
 
 const PAINT_NODE_R = 10;
 const START_NODE_R = 16;
@@ -466,8 +468,6 @@ function applyJunctionCongestion(){
   }
 }
 
-
-
 /* ===================== EDGE↔EDGE SPACING (unchanged) ===================== */
 function enforceEdgeSpacing(){
   const groups = new Map();
@@ -562,7 +562,6 @@ function tryEnterNodeIfClose(tk){
   }
 }
 
-
 /* ===================== SIDE PATTERN (target-only) ===================== */
 function drawPattern(){
   const tgt = currentTarget();
@@ -637,7 +636,7 @@ let activePointerId = null;
 function updatePointerPos(e){
   const r = cv.getBoundingClientRect();
 
-  // CSS pixels -> canvas internal pixels (800x600)
+  // CSS pixels -> canvas pixels (важно при responsive scaling)
   const scaleX = cv.width  / r.width;
   const scaleY = cv.height / r.height;
 
@@ -700,7 +699,6 @@ cv.addEventListener("pointermove", (e)=>{
       if(blocked){
         triggerShake(activeToken);
 
-        // твоя clamp логика (както вече я имаш)
         const a = byId(activeToken.edge.from);
         const b = byId(activeToken.edge.to);
         const len = Math.hypot(b.x - a.x, b.y - a.y) || 1;
@@ -716,10 +714,8 @@ cv.addEventListener("pointermove", (e)=>{
         return;
       }
 
-      // ако не е blocked, позволи switch към next (ако има)
       if(next){
         activeToken.edge = { from: junction, to: next };
-        // ако идваш от "from" край -> старт от малко навън, иначе от другия край
         activeToken.u = (junction === activeToken.edge.from) ? END_EPS : (1 - END_EPS);
         return;
       }
@@ -745,10 +741,70 @@ function endPointer(e){
 cv.addEventListener("pointerup", endPointer);
 cv.addEventListener("pointercancel", endPointer);
 cv.addEventListener("pointerleave", (e)=>{
-  // на desktop "leave" може да пусне drag-а; на touch pointercapture държи така или иначе
   if(!isPointerDown) return;
   endPointer(e);
 });
+
+/* ✅ iOS/in-app: stop long-press menu */
+cv.addEventListener("contextmenu", (e)=> e.preventDefault());
+
+/* ✅ Touch fallback for iOS webviews (Messenger etc.) */
+function touchPos(t){
+  const r = cv.getBoundingClientRect();
+  const scaleX = cv.width / r.width;
+  const scaleY = cv.height / r.height;
+  mouseX = (t.clientX - r.left) * scaleX;
+  mouseY = (t.clientY - r.top)  * scaleY;
+}
+
+cv.addEventListener("touchstart", (e)=>{
+  if(won) return;
+  e.preventDefault();
+  const t = e.touches[0];
+  if(!t) return;
+
+  touchPos(t);
+  isPointerDown = true;
+  activePointerId = null;
+
+  activeToken = pickToken(mouseX, mouseY);
+  if(activeToken) activeToken.dragging = true;
+}, { passive:false });
+
+cv.addEventListener("touchmove", (e)=>{
+  if(!isPointerDown || won) return;
+  if(!activeToken) return;
+
+  e.preventDefault();
+  const t = e.touches[0];
+  if(!t) return;
+
+  touchPos(t);
+
+  if(activeToken.state === "node"){
+    const next = chooseNeighborByDirection(activeToken.atNode, mouseX, mouseY);
+    if(!next) return;
+
+    activeToken.edge = { from: activeToken.atNode, to: next };
+    activeToken.atNode = null;
+    activeToken.state = "edge";
+    activeToken.u = projectU(activeToken.edge, mouseX, mouseY);
+    return;
+  }
+
+  if(activeToken.state === "edge"){
+    activeToken.u = projectU(activeToken.edge, mouseX, mouseY);
+  }
+}, { passive:false });
+
+function endTouch(e){
+  e.preventDefault();
+  if(activeToken) activeToken.dragging = false;
+  activeToken = null;
+  isPointerDown = false;
+}
+cv.addEventListener("touchend", endTouch, { passive:false });
+cv.addEventListener("touchcancel", endTouch, { passive:false });
 
 /* ===================== DRAW ===================== */
 function drawStartNode(n){
@@ -832,7 +888,6 @@ function drawTokens(){
     ctx.beginPath();
     ctx.arc(p.x+sx,p.y+sy,TOKEN_R,0,Math.PI*2);
     ctx.fillStyle = COLORS[tk.color];
-    // ✅ FIX: isMouseDown -> isPointerDown (само това е променено)
     ctx.globalAlpha = (tk === activeToken && isPointerDown) ? 1 : 0.95;
     ctx.fill();
     ctx.globalAlpha = 1;
@@ -971,7 +1026,7 @@ function advance(){
 nextBtn.addEventListener("click", ()=>{ winOverlay.style.display="none"; won = false; advance(); });
 resetBtn.addEventListener("click", ()=>{ winOverlay.style.display="none"; won = false; hardResetState(); applyVisibilityAndPaintabilityForLevel(); });
 
-/* ===================== pickToken (needed by pointerdown) ===================== */
+/* ===================== pickToken (needed by pointerdown/touchstart) ===================== */
 function pickToken(x, y){
   for(let i=tokens.length-1; i>=0; i--){
     const tk = tokens[i];
