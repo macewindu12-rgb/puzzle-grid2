@@ -752,14 +752,104 @@ cv.addEventListener("pointerleave", (e)=>{
 /* ✅ iOS/in-app: stop long-press menu */
 cv.addEventListener("contextmenu", (e)=> e.preventDefault());
 
-/* ✅ Touch fallback for iOS webviews (Messenger etc.) */
-function touchPos(t){
-  const r = cv.getBoundingClientRect();
-  const scaleX = cv.width / r.width;
-  const scaleY = cv.height / r.height;
-  mouseX = (t.clientX - r.left) * scaleX;
-  mouseY = (t.clientY - r.top)  * scaleY;
+/* ✅ Touch fallback only for in-app webviews (so it won't conflict with Pointer Events in Safari) */
+const IS_INAPP_WEBVIEW = /FBAN|FBAV|Instagram|Line|Twitter/i.test(navigator.userAgent);
+const USE_TOUCH_FALLBACK = !window.PointerEvent || IS_INAPP_WEBVIEW;
+
+if (USE_TOUCH_FALLBACK) {
+  function touchPos(t){
+    const r = cv.getBoundingClientRect();
+    const scaleX = cv.width / r.width;
+    const scaleY = cv.height / r.height;
+    mouseX = (t.clientX - r.left) * scaleX;
+    mouseY = (t.clientY - r.top)  * scaleY;
+  }
+
+  cv.addEventListener("touchstart", (e)=>{
+    if(won) return;
+    e.preventDefault();
+    const t = e.touches[0];
+    if(!t) return;
+
+    touchPos(t);
+    isPointerDown = true;
+    activePointerId = null;
+
+    activeToken = pickToken(mouseX, mouseY);
+    if(activeToken) activeToken.dragging = true;
+  }, { passive:false });
+
+  cv.addEventListener("touchmove", (e)=>{
+    if(!isPointerDown || won) return;
+    if(!activeToken) return;
+
+    e.preventDefault();
+    const t = e.touches[0];
+    if(!t) return;
+
+    touchPos(t);
+
+    // 1:1 като pointermove логиката ти (без да пипаме друго)
+    if(activeToken.state === "node"){
+      const next = chooseNeighborByDirection(activeToken.atNode, mouseX, mouseY);
+      if(!next) return;
+
+      activeToken.edge = { from: activeToken.atNode, to: next };
+      activeToken.atNode = null;
+      activeToken.state = "edge";
+      activeToken.u = projectU(activeToken.edge, mouseX, mouseY);
+      return;
+    }
+
+    if(activeToken.state === "edge"){
+      activeToken.u = projectU(activeToken.edge, mouseX, mouseY);
+
+      const nearFrom = activeToken.u <= END_EPS;
+      const nearTo   = activeToken.u >= 1 - END_EPS;
+
+      if(nearFrom || nearTo){
+        const junction = nearFrom ? activeToken.edge.from : activeToken.edge.to;
+
+        const next = chooseNeighborByDirection(junction, mouseX, mouseY);
+        const blocked = isNodeHardOccupied(junction, activeToken) || isNodeAreaBlocked(junction, activeToken);
+
+        if(blocked){
+          triggerShake(activeToken);
+
+          const a = byId(activeToken.edge.from);
+          const b = byId(activeToken.edge.to);
+          const len = Math.hypot(b.x - a.x, b.y - a.y) || 1;
+
+          const R = TOKEN_R * 2 + NODE_BARRIER_PAD + HARD_BLOCK_PAD;
+          const barrierU = Math.min(0.49, R / len);
+
+          if(junction === activeToken.edge.from){
+            activeToken.u = Math.max(activeToken.u, barrierU);
+          }else{
+            activeToken.u = Math.min(activeToken.u, 1 - barrierU);
+          }
+          return;
+        }
+
+        if(next){
+          activeToken.edge = { from: junction, to: next };
+          activeToken.u = (junction === activeToken.edge.from) ? END_EPS : (1 - END_EPS);
+          return;
+        }
+      }
+    }
+  }, { passive:false });
+
+  function endTouch(e){
+    e.preventDefault();
+    if(activeToken) activeToken.dragging = false;
+    activeToken = null;
+    isPointerDown = false;
+  }
+  cv.addEventListener("touchend", endTouch, { passive:false });
+  cv.addEventListener("touchcancel", endTouch, { passive:false });
 }
+
 
 cv.addEventListener("touchstart", (e)=>{
   if(won) return;
