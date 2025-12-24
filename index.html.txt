@@ -1,0 +1,912 @@
+<!DOCTYPE html>
+<html lang="bg">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Rail Tokens – Node Barrier Fix</title>
+<style>
+  body{ margin:0; height:100vh; display:flex; background:#171717; font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif; }
+  #wrap{ flex:1; display:flex; justify-content:center; align-items:center; position:relative; }
+  canvas{ background:#2b1a12; border:2px solid #aa7744; }
+  #side{ width:240px; background:#0f0f0f; border-left:2px solid #2a2a2a; display:flex; justify-content:center; align-items:flex-start; padding-top:22px; box-sizing:border-box; }
+  #pattern{ width:200px; height:200px; border:1px solid rgba(255,255,255,12); border-radius:14px; background:#0b0b0b; }
+
+  #hud{ position:absolute; top:10px; left:10px; user-select:none; }
+  .levelRow{ display:flex; gap:10px; padding:10px 12px; border:2px solid rgba(255,255,255,18); background:rgba(0,0,0,25); border-radius:8px; }
+  .lvlDot{ width:28px; height:28px; border-radius:50%; display:flex; align-items:center; justify-content:center; font-size:13px;
+           border:2px solid rgba(255,255,255,55); color:#eaeaea; background:transparent; opacity:.35; }
+  .lvlDot.done{ opacity:1; background:rgba(255,255,255,92); color:#111; border-color: rgba(255,255,255,92); }
+  .lvlDot.current{ opacity:1; border-color: rgba(255,255,255,98); box-shadow: 0 0 0 3px rgba(255,255,255,12); }
+
+  #win{ position:absolute; inset:0; display:none; justify-content:center; align-items:center; background:rgba(0,0,0,0.86); color:#eee; }
+  #win .card{ min-width:340px; padding:18px 20px; border:2px solid rgba(255,255,255,0.18); background:rgba(10,10,10,0.88);
+              border-radius:14px; box-shadow:0 10px 40px rgba(0,0,0,0.55); }
+  #win h2{ margin:0 0 6px; font-size:20px; }
+  #win .sub{ opacity:0.9; font-size:14px; margin-bottom:14px; }
+  #win .btns{ display:flex; gap:10px; justify-content:flex-end; }
+  #win button{ cursor:pointer; padding:9px 12px; border-radius:10px; border:1px solid rgba(255,255,255,0.18); background:#1b1b1b; color:#eee; font-weight:600; }
+  #win button:hover{ background:#232323; }
+</style>
+</head>
+
+<body>
+  <div id="wrap">
+    <div id="hud"></div>
+    <canvas id="cv" width="760" height="600"></canvas>
+
+    <div id="win">
+      <div class="card">
+        <h2>Успех!</h2>
+        <div class="sub" id="winSub">НИВО 1</div>
+        <div class="btns">
+          <button id="resetBtn">Рестарт</button>
+          <button id="nextBtn">Следващо ниво</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div id="side">
+    <canvas id="pattern" width="200" height="200"></canvas>
+  </div>
+
+<script>
+/* ===================== CONSTANTS ===================== */
+const COLORS = { A:"#ff5555", B:"#55ff55", C:"#5599ff" };
+const EDGE_COL = "#aa7744";
+const EDGE_DIM = "#6a4a2a";
+const JUNCTION_MAX_INNER = 1; // колко токена може да са “вътре” в бариерата около node (реално 1)
+const junctionWinner = new Map(); // nodeId -> tokenId
+
+
+const PAINT_NODE_R = 10;
+const START_NODE_R = 16;
+const TOKEN_R = 18;
+
+const PICK_R  = 28;
+const END_EPS = 0.03;
+
+const TOKEN_GAP_PX = 6;
+
+const SHAKE_TIME = 0.18;
+const SHAKE_PX   = 3.2;
+
+// ✅ Node-area barrier (fixes node/near-node "quantum pass-through")
+const NODE_BARRIER_PAD = 6;     // px extra padding around node occupancy zone
+const HARD_BLOCK_PAD   = 2;     // px extra hardness for no-cross clamp
+
+/* ===================== NODES (clean grid) ===================== */
+const baseNodes = [
+  { id:"A", x:380, y:180, start:true,  startColor:"A", paint:null, paintable:false, visible:true },
+  { id:"B", x:260, y:300, start:true,  startColor:"B", paint:null, paintable:false, visible:true },
+  { id:"C", x:380, y:540, start:true,  startColor:"C", paint:null, paintable:false, visible:true },
+
+  { id:"X", x:380, y:300, start:false, paint:null, paintable:false, visible:false },
+  { id:"L", x:260, y:420, start:false, paint:null, paintable:false, visible:false },
+  { id:"R", x:500, y:300, start:false, paint:null, paintable:false, visible:false },
+
+  { id:"P", x:380, y:420, start:false, paint:null, paintable:false, visible:false },
+  { id:"Q", x:260, y:540, start:false, paint:null, paintable:false, visible:false },
+  { id:"S", x:500, y:180, start:false, paint:null, paintable:false, visible:false },
+  { id:"T", x:500, y:420, start:false, paint:null, paintable:false, visible:false },
+  { id:"U", x:500, y:540, start:false, paint:null, paintable:false, visible:false },
+
+  { id:"V", x:500, y:360, start:false, paint:null, paintable:false, visible:false }
+];
+
+/* ===================== LEVELS ===================== */
+const edgesSimple = [
+  ["A","X"], ["B","X"],
+  ["X","R"],
+  ["X","P"], ["P","C"]
+];
+
+const edgesL4 = [
+  ["A","X"], ["B","X"],
+  ["X","R"], ["R","V"], ["V","T"], ["T","P"], ["P","X"],
+  ["X","P"], ["P","C"]
+];
+
+const edgesL5 = [
+  ["B","X"],
+  ["A","X"], ["X","R"], ["R","S"], ["S","A"],
+  ["X","L"], ["L","Q"], ["Q","C"], ["C","P"], ["P","X"],
+  ["P","L"]
+];
+
+// ✅ Level 6 bridge is R–T (movement is consistent and gate is real)
+const edgesL6 = [
+  ["B","X"],
+  ["A","X"], ["X","R"], ["R","S"], ["S","A"],
+  ["P","C"],
+  ["P","L"], ["L","Q"], ["Q","C"],
+  ["P","T"], ["T","U"], ["U","C"],
+  ["R","T"]
+];
+
+const levels = [
+  { edges: edgesSimple, paintTarget:{ X:"B", R:"C", P:"A" } }, // 1
+  { edges: edgesSimple, paintTarget:{ X:"A", R:"C", P:"B" } }, // 2
+  { edges: edgesSimple, paintTarget:{ X:"C", R:"B", P:"A" } }, // 3
+  { edges: edgesL4,     paintTarget:{ X:"A", R:"B", V:"C", T:"B", P:"C" } }, // 4
+  { edges: edgesL5,     paintTarget:{ X:"B", R:"C", S:"A", P:"C", L:"A", Q:"B" } }, // 5
+  { edges: edgesL6,     paintTarget:{ X:"B", R:"C", S:"A", T:"B", P:"A", Q:"C", U:"A" } } // 6
+];
+
+const completed = levels.map(_ => false);
+let levelIndex = 0;
+
+/* ===================== CANVAS / UI ===================== */
+const cv = document.getElementById("cv");
+const ctx = cv.getContext("2d");
+const pat = document.getElementById("pattern");
+const pctx = pat.getContext("2d");
+
+const winOverlay = document.getElementById("win");
+const nextBtn = document.getElementById("nextBtn");
+const resetBtn = document.getElementById("resetBtn");
+const winSub = document.getElementById("winSub");
+const hud = document.getElementById("hud");
+
+let won = false;
+
+/* ===================== ACTIVE GRAPH STATE ===================== */
+let nodes = [];
+let edges = [];
+let activeNodeIds = new Set();
+const byId = (id)=>nodes.find(n=>n.id===id);
+
+function neighbors(nodeId){
+  const out = [];
+  for (const [a,b] of edges){
+    if(a===nodeId) out.push(b);
+    else if(b===nodeId) out.push(a);
+  }
+  return out;
+}
+function edgeKey(a,b){ return a < b ? `${a}|${b}` : `${b}|${a}`; }
+
+/* ===================== TOKENS ===================== */
+const tokens = [
+  { id:"TA", color:"A", state:"node", atNode:"A", edge:null, u:0, dragging:false, shakeT:0 },
+  { id:"TB", color:"B", state:"node", atNode:"B", edge:null, u:0, dragging:false, shakeT:0 },
+  { id:"TC", color:"C", state:"node", atNode:"C", edge:null, u:0, dragging:false, shakeT:0 }
+];
+
+function tokenPos(tk){
+  if(tk.state === "node"){
+    const n = byId(tk.atNode);
+    return {x:n.x, y:n.y};
+  }
+  const a = byId(tk.edge.from);
+  const b = byId(tk.edge.to);
+  return { x: a.x + (b.x-a.x)*tk.u, y: a.y + (b.y-a.y)*tk.u };
+}
+
+/* ===================== GEOMETRY HELPERS ===================== */
+function clamp(v,a,b){ return Math.max(a, Math.min(b,v)); }
+
+function projectU(edge, px, py){
+  const a = byId(edge.from), b = byId(edge.to);
+  const vx=b.x-a.x, vy=b.y-a.y;
+  const wx=px-a.x, wy=py-a.y;
+  const l2=vx*vx+vy*vy || 1;
+  return clamp((wx*vx+wy*vy)/l2, 0, 1);
+}
+
+function edgeLength(edge){
+  const a = byId(edge.from), b = byId(edge.to);
+  return Math.hypot(b.x-a.x, b.y-a.y) || 1;
+}
+
+/* ===================== DIRECTION CHOICE ===================== */
+function chooseNeighborByDirection(fromId, px, py){
+  const from = byId(fromId);
+  const mx = px - from.x, my = py - from.y;
+  const mLen = Math.hypot(mx, my);
+
+  const nbs = neighbors(fromId);
+  if(nbs.length === 0) return null;
+
+  const mdx = (mLen > 0.0001) ? mx / mLen : 0;
+  const mdy = (mLen > 0.0001) ? my / mLen : 0;
+
+  let best=null, bestScore=-Infinity;
+  for(const nbId of nbs){
+    const nb = byId(nbId);
+    const ex=nb.x-from.x, ey=nb.y-from.y;
+    const eLen = Math.hypot(ex,ey) || 1;
+    const score = (ex/eLen)*mdx + (ey/eLen)*mdy;
+    if(score > bestScore){
+      bestScore = score;
+      best = nbId;
+    }
+  }
+  if(bestScore < 0.15){
+    if(nbs.length === 1) return nbs[0];
+    return null;
+  }
+  return best;
+}
+
+/* ===================== PAINT + WIN ===================== */
+function maybePaintNode(nodeId, color){
+  const n = byId(nodeId);
+  if(!n) return;
+  if(n.start) return;
+  if(n.paintable !== true) return;
+  if(n.paint === color) return;
+  n.paint = color;
+}
+function currentTarget(){ return levels[levelIndex].paintTarget || {}; }
+
+function checkWin(){
+  const tgt = currentTarget();
+  for(const nodeId in tgt){
+    const n = byId(nodeId);
+    if(!n || n.paint !== tgt[nodeId]) return;
+  }
+  won = true;
+  winOverlay.style.display="flex";
+  winSub.textContent = `НИВО ${levelIndex+1}`;
+  completed[levelIndex] = true;
+  renderHud();
+  nextBtn.textContent = (levelIndex >= levels.length - 1) ? "Отначало" : "Следващо ниво";
+}
+
+/* ===================== NODE-AREA BARRIER (MAIN FIX) ===================== */
+function isNodeAreaBlocked(nodeId, exceptToken=null){
+  const n = byId(nodeId);
+  if(!n) return false;
+
+  const R = TOKEN_R * 2 + NODE_BARRIER_PAD + HARD_BLOCK_PAD;
+
+  for(const t of tokens){
+    if(t === exceptToken) continue;
+    const p = tokenPos(t);
+if(Math.hypot(p.x - n.x, p.y - n.y) <= R) return true;
+  }
+  return false;
+}
+
+function isNodeHardOccupied(nodeId, exceptToken=null){
+  return tokens.some(t =>
+    t !== exceptToken &&
+    t.state === "node" &&
+    t.atNode === nodeId
+  );
+}
+
+
+// Clamp edge tokens out of occupied endpoint zones (prevents near-node tunneling)
+function applyNodeAreaBarriers(){
+  for(const tk of tokens){
+    if(tk.state !== "edge") continue;
+
+    const a = byId(tk.edge.from);
+    const b = byId(tk.edge.to);
+    const len = Math.hypot(b.x-a.x, b.y-a.y) || 1;
+
+    const barrierU = Math.min(0.49, (TOKEN_R*2 + NODE_BARRIER_PAD + HARD_BLOCK_PAD) / len);
+
+    if(isNodeAreaBlocked(tk.edge.from, tk) && tk.u < barrierU){
+      tk.u = barrierU;
+      triggerShake(tk);
+    }
+    if(isNodeAreaBlocked(tk.edge.to, tk) && tk.u > 1 - barrierU){
+      tk.u = 1 - barrierU;
+      triggerShake(tk);
+    }
+  }
+}
+
+function applyJunctionCongestion(){
+  const R = TOKEN_R * 2 + NODE_BARRIER_PAD + HARD_BLOCK_PAD;
+
+  for(const n of nodes){
+    if(!activeNodeIds.has(n.id)) continue;
+
+    // всички токени в junction зоната около този node
+    const near = [];
+    for(const tk of tokens){
+      const incident =
+        (tk.state === "node" && tk.atNode === n.id) ||
+        (tk.state === "edge" && (tk.edge.from === n.id || tk.edge.to === n.id));
+
+      if(!incident) continue;
+
+      const p = tokenPos(tk);
+      const d = Math.hypot(p.x - n.x, p.y - n.y);
+      if(d < R) near.push({ tk, d });
+    }
+
+    if(near.length <= 1) continue;
+
+    // winner: ако има dragging токен в зоната — той печели, иначе най-близкият
+    let winnerObj = near.find(o => o.tk.dragging);
+    if(!winnerObj){
+      near.sort((a,b)=> a.d - b.d);
+      winnerObj = near[0];
+    }else{
+      // сложи го най-отпред за удобство
+      const idx = near.indexOf(winnerObj);
+      if(idx > 0){
+        near.splice(idx, 1);
+        near.unshift(winnerObj);
+      }
+    }
+
+    const winner = winnerObj.tk;
+
+    // Всички останали са "losers" и се бутат навън.
+    // Ако имаш JUNCTION_MAX_INNER, ползвай го; ако не — приемаме 1.
+    const keepInner = (typeof JUNCTION_MAX_INNER === "number") ? JUNCTION_MAX_INNER : 1;
+
+    // Подреди останалите по дистанция (за стабилна опашка)
+    const rest = near.slice(keepInner).sort((a,b)=>{
+      const diff = a.d - b.d;
+      if(Math.abs(diff) > 0.001) return diff;
+      // tie-breaker по id, ако имаш; иначе по index в tokens
+      const ai = (a.tk.id ?? tokens.indexOf(a.tk));
+      const bi = (b.tk.id ?? tokens.indexOf(b.tk));
+      return ai - bi;
+    });
+
+    for(let k=0; k<rest.length; k++){
+      const tk = rest[k].tk;
+
+      // 1) Ако губещият е НА node-а — eject навън по стабилен изход
+      if(tk.state === "node" && tk.atNode === n.id){
+        // ако node-а е dead-end (<=1 изход) не правим eject
+        const nbs = neighbors(n.id);
+        if(nbs.length <= 1) continue;
+
+        // предпочитан изход: по lastEdge (обратната посока от която е влязъл)
+        let bestNb = null;
+
+        if(tk.lastEdge){
+          const le = tk.lastEdge;
+          // ако е влязъл по (nb -> n), значи изходът “навън” е nb
+          if(le.to === n.id) bestNb = le.from;
+          else if(le.from === n.id) bestNb = le.to;
+        }
+
+        // ако няма lastEdge или е невалиден — вземи първия съсед, който не е твърдо блокиран
+        if(!bestNb || !nbs.includes(bestNb)){
+          bestNb = null;
+          for(const nb of nbs){
+            // не eject-ваме към твърдо зает node
+            if(isNodeHardOccupied && isNodeHardOccupied(nb, tk)) continue;
+            bestNb = nb; break;
+          }
+        }
+
+        if(!bestNb) continue;
+
+        // премести токена на edge и го сложи на безопасно разстояние от node-а
+        const a = byId(n.id), b = byId(bestNb);
+        const len = Math.hypot(b.x-a.x, b.y-a.y) || 1;
+        const barrierU = Math.min(0.49, R / len);
+
+        // подреждане в "опашка" навън
+        const sepU = (2*TOKEN_R + (TOKEN_GAP_PX ?? 4)) / len; // ако TOKEN_GAP_PX липсва -> 4
+        const offset = (k+1) * sepU;
+
+        tk.state = "edge";
+        tk.edge = { from: n.id, to: bestNb };
+        tk.atNode = null;
+
+        tk.u = Math.min(0.98, barrierU + offset);
+        triggerShake(tk);
+        continue;
+      }
+
+      // 2) Ако губещият е на edge — бутаме го да не влиза в зоната около node-а
+      if(tk.state !== "edge") continue;
+
+      const from = tk.edge.from;
+      const to   = tk.edge.to;
+
+      const a = byId(from), b = byId(to);
+      const len = Math.hypot(b.x-a.x, b.y-a.y) || 1;
+      const barrierU = Math.min(0.49, R / len);
+
+      const sepU = (2*TOKEN_R + (TOKEN_GAP_PX ?? 4)) / len;
+      const offset = (k+1) * sepU;
+
+      if(from === n.id){
+        const minU = Math.min(0.98, barrierU + offset);
+        if(tk.u < minU) tk.u = minU;
+      }else if(to === n.id){
+        const maxU = Math.max(0.02, 1 - barrierU - offset);
+        if(tk.u > maxU) tk.u = maxU;
+      }
+    }
+  }
+}
+
+
+
+/* ===================== EDGE↔EDGE SPACING (unchanged) ===================== */
+function enforceEdgeSpacing(){
+  const groups = new Map();
+  for(const tk of tokens){
+    if(tk.state === "edge"){
+      const k = edgeKey(tk.edge.from, tk.edge.to);
+      if(!groups.has(k)) groups.set(k, []);
+      groups.get(k).push(tk);
+    }
+  }
+
+  for(const [k, list] of groups.entries()){
+    if(list.length < 2) continue;
+
+    const [n1,n2] = k.split("|");
+    const canonFrom = n1, canonTo = n2;
+    const len = edgeLength({from:canonFrom, to:canonTo});
+    const minSepU = (2*TOKEN_R + TOKEN_GAP_PX) / len;
+
+    const mapped = list.map(tk=>{
+      const forward = (tk.edge.from === canonFrom && tk.edge.to === canonTo);
+      const u0 = forward ? tk.u : (1 - tk.u);
+      return { tk, u0, forward };
+    }).sort((a,b)=>a.u0-b.u0);
+
+    for(let i=1;i<mapped.length;i++){
+      const prev = mapped[i-1];
+      const cur  = mapped[i];
+      if(cur.u0 - prev.u0 < minSepU){
+        cur.u0 = prev.u0 + minSepU;
+      }
+    }
+
+    for(const m of mapped){
+      m.u0 = clamp(m.u0, 0, 1);
+      m.tk.u = m.forward ? m.u0 : (1 - m.u0);
+    }
+  }
+}
+
+/* ===================== NODE ENTRY (uses node-area barrier) ===================== */
+function triggerShake(tk){ tk.shakeT = SHAKE_TIME; }
+
+function tryEnterNodeIfClose(tk){
+  if(tk.state !== "edge") return;
+
+  // helper за barrierU на текущия edge
+  const a = byId(tk.edge.from);
+  const b = byId(tk.edge.to);
+  const len = Math.hypot(b.x - a.x, b.y - a.y) || 1;
+  const R = TOKEN_R * 2 + NODE_BARRIER_PAD + HARD_BLOCK_PAD;
+  const barrierU = Math.min(0.49, R / len);
+
+  if(tk.u <= END_EPS){
+    const dest = tk.edge.from;
+
+    if(isNodeAreaBlocked(dest, tk)) {
+      tk.u = Math.max(tk.u, barrierU);
+      triggerShake(tk);
+      return;
+    }
+
+   tk.lastEdge = { ...tk.edge };
+tk.state = "node";
+tk.atNode = dest;
+tk.edge = null;
+    tk.u = 0;
+    junctionWinner.set(dest, tk.id);
+    maybePaintNode(dest, tk.color);
+    checkWin();
+    return;
+  }
+
+  if(tk.u >= 1 - END_EPS){
+    const dest = tk.edge.to;
+
+    if(isNodeAreaBlocked(dest, tk)) {
+      tk.u = Math.min(tk.u, 1 - barrierU);
+      triggerShake(tk);
+      return;
+    }
+
+    tk.lastEdge = { ...tk.edge };
+tk.state = "node";
+tk.atNode = dest;
+tk.edge = null;
+    tk.u = 0;
+    junctionWinner.set(dest, tk.id);
+    maybePaintNode(dest, tk.color);
+    checkWin();
+    return;
+  }
+}
+
+
+/* ===================== SIDE PATTERN (target-only) ===================== */
+function drawPattern(){
+  const tgt = currentTarget();
+
+  pctx.clearRect(0,0,pat.width,pat.height);
+  pctx.fillStyle="#0b0b0b";
+  pctx.fillRect(0,0,pat.width,pat.height);
+
+  const ids = Object.keys(tgt);
+  if(ids.length === 0) return;
+
+  const pts = ids.map(id => byId(id)).filter(Boolean);
+  let minX=Infinity,minY=Infinity,maxX=-Infinity,maxY=-Infinity;
+  for(const n of pts){
+    minX=Math.min(minX,n.x); minY=Math.min(minY,n.y);
+    maxX=Math.max(maxX,n.x); maxY=Math.max(maxY,n.y);
+  }
+  const pad = 18;
+  const w = Math.max(1, maxX-minX);
+  const h = Math.max(1, maxY-minY);
+  const scale = Math.min((pat.width-2*pad)/w, (pat.height-2*pad)/h);
+
+  const map = new Map();
+  for(const n of pts){
+    const x = pad + (n.x-minX)*scale;
+    const y = pad + (n.y-minY)*scale;
+    map.set(n.id, {x,y});
+  }
+
+  pctx.lineWidth = 5;
+  pctx.lineCap = "round";
+  pctx.strokeStyle="rgba(255,255,255,0.10)";
+  pctx.beginPath();
+  for(const [a,b] of edges){
+    if(!map.has(a) || !map.has(b)) continue;
+    const A = map.get(a), B = map.get(b);
+    pctx.moveTo(A.x,A.y);
+    pctx.lineTo(B.x,B.y);
+  }
+  pctx.stroke();
+
+  for(const id of ids){
+    const p = map.get(id);
+    if(!p) continue;
+    const col = COLORS[tgt[id]];
+
+    pctx.beginPath();
+    pctx.arc(p.x,p.y,16,0,Math.PI*2);
+    pctx.fillStyle=col;
+    pctx.globalAlpha=0.92;
+    pctx.fill();
+    pctx.globalAlpha=1;
+
+    pctx.strokeStyle="rgba(255,255,255,0.28)";
+    pctx.lineWidth=2;
+    pctx.stroke();
+
+    pctx.fillStyle="rgba(0,0,0,0.55)";
+    pctx.font="11px system-ui, -apple-system, Segoe UI, Roboto, sans-serif";
+    pctx.textAlign="center";
+    pctx.textBaseline="middle";
+    pctx.fillText(id, p.x, p.y);
+  }
+}
+
+/* ===================== INPUT ===================== */
+let mouseX=0, mouseY=0;
+let activeToken=null;
+let isMouseDown=false;
+
+cv.addEventListener("mousedown", (e)=>{
+  if(won) return;
+  const r=cv.getBoundingClientRect();
+  mouseX=e.clientX-r.left;
+  mouseY=e.clientY-r.top;
+  isMouseDown=true;
+
+  activeToken = pickToken(mouseX, mouseY);
+  if(activeToken) activeToken.dragging = true;
+});
+
+cv.addEventListener("mousemove", (e)=>{
+  const r=cv.getBoundingClientRect();
+  mouseX=e.clientX-r.left;
+  mouseY=e.clientY-r.top;
+
+  if(!isMouseDown || !activeToken || won) return;
+
+  if(activeToken.state === "node"){
+    const next = chooseNeighborByDirection(activeToken.atNode, mouseX, mouseY);
+    if(!next) return;
+    activeToken.edge = { from: activeToken.atNode, to: next };
+    activeToken.atNode = null;
+    activeToken.state = "edge";
+    activeToken.u = projectU(activeToken.edge, mouseX, mouseY);
+    return;
+  }
+
+  if(activeToken.state === "edge"){
+    activeToken.u = projectU(activeToken.edge, mouseX, mouseY);
+
+    const nearFrom = activeToken.u <= END_EPS;
+    const nearTo   = activeToken.u >= 1 - END_EPS;
+
+    if(nearFrom || nearTo){
+      const junction = nearFrom ? activeToken.edge.from : activeToken.edge.to;
+
+      const next = chooseNeighborByDirection(junction, mouseX, mouseY);
+     const blocked = isNodeHardOccupied(junction, activeToken) || isNodeAreaBlocked(junction, activeToken);
+
+
+if(blocked){
+  // ✅ ключ: когато junction е зает, ЗАБРАНЯВАМЕ auto-switch към друг edge
+  triggerShake(activeToken);
+
+  // просто го държим на текущия edge на безопасна дистанция от възела
+  // (не му позволяваме да “влезе” в node-area бариерата)
+  const a = byId(activeToken.edge.from);
+  const b = byId(activeToken.edge.to);
+  const len = Math.hypot(b.x - a.x, b.y - a.y) || 1;
+
+  const R = TOKEN_R * 2 + NODE_BARRIER_PAD + HARD_BLOCK_PAD;
+  const barrierU = Math.min(0.49, R / len);
+
+  if(junction === activeToken.edge.from){
+    activeToken.u = Math.max(activeToken.u, barrierU);
+  }else{
+    activeToken.u = Math.min(activeToken.u, 1 - barrierU);
+  }
+
+  return;
+}
+
+      maybePaintNode(junction, activeToken.color);
+      checkWin();
+      if(won) return;
+
+      if(next){
+        activeToken.edge = { from: junction, to: next };
+        activeToken.u = projectU(activeToken.edge, mouseX, mouseY);
+      }
+    }
+  }
+});
+
+cv.addEventListener("mouseup", ()=>{
+  isMouseDown=false;
+  if(activeToken) activeToken.dragging = false;
+  activeToken = null;
+});
+
+function pickToken(px,py){
+  let best=null, bestD=Infinity;
+  for(const tk of tokens){
+    const p = tokenPos(tk);
+    const d = Math.hypot(p.x-px, p.y-py);
+    if(d <= PICK_R && d < bestD){
+      bestD=d; best=tk;
+    }
+  }
+  return best;
+}
+
+/* ===================== DRAW ===================== */
+function drawStartNode(n){
+  ctx.beginPath();
+  ctx.arc(n.x,n.y,START_NODE_R,0,Math.PI*2);
+  ctx.fillStyle = "rgba(255,255,255,0.06)";
+  ctx.fill();
+  ctx.strokeStyle = "rgba(255,255,255,0.55)";
+  ctx.lineWidth = 3;
+  ctx.stroke();
+
+  ctx.beginPath();
+  ctx.arc(n.x,n.y,START_NODE_R+1, -Math.PI*0.15, Math.PI*0.15);
+  ctx.strokeStyle = COLORS[n.startColor];
+  ctx.lineWidth = 3;
+  ctx.stroke();
+}
+
+function drawPaintNode(n){
+  if(n.paint){
+    ctx.save();
+    ctx.shadowColor = COLORS[n.paint];
+    ctx.shadowBlur = 18;
+    ctx.fillStyle = COLORS[n.paint];
+    ctx.globalAlpha = 0.85;
+    ctx.beginPath();
+    ctx.arc(n.x, n.y, PAINT_NODE_R, 0, Math.PI*2);
+    ctx.fill();
+    ctx.restore();
+
+    ctx.beginPath();
+    ctx.arc(n.x, n.y, PAINT_NODE_R, 0, Math.PI*2);
+    ctx.strokeStyle = "rgba(255,255,255,0.25)";
+    ctx.lineWidth = 2;
+    ctx.stroke();
+  }else{
+    ctx.beginPath();
+    ctx.arc(n.x, n.y, PAINT_NODE_R, 0, Math.PI*2);
+    ctx.fillStyle = "rgba(255,255,255,0.04)";
+    ctx.fill();
+    ctx.strokeStyle = "rgba(255,255,255,0.10)";
+    ctx.lineWidth = 2;
+    ctx.stroke();
+  }
+}
+
+function drawEdges(){
+  ctx.lineWidth = 10;
+  ctx.lineCap = "round";
+  ctx.strokeStyle = EDGE_DIM;
+  for(const [a,b] of edges){
+    const A = byId(a), B = byId(b);
+    ctx.beginPath();
+    ctx.moveTo(A.x,A.y);
+    ctx.lineTo(B.x,B.y);
+    ctx.stroke();
+  }
+  ctx.lineWidth = 6;
+  ctx.strokeStyle = EDGE_COL;
+  for(const [a,b] of edges){
+    const A = byId(a), B = byId(b);
+    ctx.beginPath();
+    ctx.moveTo(A.x,A.y);
+    ctx.lineTo(B.x,B.y);
+    ctx.stroke();
+  }
+}
+
+function drawTokens(){
+  for(const tk of tokens){
+    const p = tokenPos(tk);
+
+    let sx=0, sy=0;
+    if(tk.shakeT > 0){
+      const phase = (1 - tk.shakeT/SHAKE_TIME) * Math.PI * 10;
+      const amp = SHAKE_PX * (tk.shakeT / SHAKE_TIME);
+      sx = Math.sin(phase) * amp;
+      sy = Math.cos(phase) * amp * 0.35;
+    }
+
+    ctx.beginPath();
+    ctx.arc(p.x+sx,p.y+sy,TOKEN_R,0,Math.PI*2);
+    ctx.fillStyle = COLORS[tk.color];
+    ctx.globalAlpha = (tk === activeToken && isMouseDown) ? 1 : 0.95;
+    ctx.fill();
+    ctx.globalAlpha = 1;
+    ctx.strokeStyle="rgba(0,0,0,0.35)";
+    ctx.lineWidth=2;
+    ctx.stroke();
+
+    ctx.beginPath();
+    ctx.arc(p.x - 6 + sx, p.y - 6 + sy, 5, 0, Math.PI*2);
+    ctx.fillStyle="rgba(255,255,255,0.22)";
+    ctx.fill();
+  }
+}
+
+function draw(){
+  ctx.clearRect(0,0,cv.width,cv.height);
+  drawEdges();
+
+  for(const n of nodes){
+    if(!activeNodeIds.has(n.id)) continue;
+    if(!n.visible) continue;
+    if(n.start) drawStartNode(n);
+    else drawPaintNode(n);
+  }
+
+  drawTokens();
+}
+
+/* ===================== LOOP ===================== */
+let last = performance.now();
+function loop(ts){
+  const dt = Math.min(0.033, (ts-last)/1000);
+  last = ts;
+
+  if(!won){
+  enforceEdgeSpacing();
+  applyNodeAreaBarriers();
+  applyJunctionCongestion();
+
+  for(const tk of tokens){
+    tryEnterNodeIfClose(tk);
+    if(tk.shakeT > 0) tk.shakeT = Math.max(0, tk.shakeT - dt);
+  }
+}
+
+  draw();
+  requestAnimationFrame(loop);
+}
+
+/* ===================== HUD + LEVEL CONTROL ===================== */
+function renderHud(){
+  hud.innerHTML = "";
+  const row = document.createElement("div");
+  row.className = "levelRow";
+
+  for(let i=0; i<levels.length; i++){
+    const d = document.createElement("div");
+    d.className = "lvlDot";
+    d.textContent = String(i+1);
+
+    if(completed[i]) d.classList.add("done");
+    if(i === levelIndex) d.classList.add("current");
+
+    const clickable = completed[i] || i === levelIndex || i < levelIndex;
+    d.style.cursor = clickable ? "pointer" : "default";
+    d.addEventListener("click", ()=>{ if(clickable) applyLevel(i, true); });
+
+    row.appendChild(d);
+  }
+  hud.appendChild(row);
+}
+
+function deepCopyNodes(){ return baseNodes.map(n => ({ ...n, paint:null })); }
+
+function hardResetState(){
+  junctionWinner.clear();
+  for(const n of nodes){ if(!n.start) n.paint = null; }
+  tokens[0].state="node"; tokens[0].atNode="A"; tokens[0].edge=null; tokens[0].u=0; tokens[0].dragging=false; tokens[0].shakeT=0;
+  tokens[1].state="node"; tokens[1].atNode="B"; tokens[1].edge=null; tokens[1].u=0; tokens[1].dragging=false; tokens[1].shakeT=0;
+  tokens[2].state="node"; tokens[2].atNode="C"; tokens[2].edge=null; tokens[2].u=0; tokens[2].dragging=false; tokens[2].shakeT=0;
+}
+
+function computeActiveNodeIds(){
+  activeNodeIds = new Set();
+  for(const [a,b] of edges){ activeNodeIds.add(a); activeNodeIds.add(b); }
+  activeNodeIds.add("A"); activeNodeIds.add("B"); activeNodeIds.add("C");
+}
+
+function applyVisibilityAndPaintabilityForLevel(){
+  const tgt = currentTarget();
+  const targetIds = new Set(Object.keys(tgt));
+
+  for(const n of nodes){
+    if(!activeNodeIds.has(n.id)){
+      n.visible = false; n.paintable = false; continue;
+    }
+    if(n.start){
+      n.visible = true; n.paintable = false; continue;
+    }
+    if(targetIds.has(n.id)){
+      n.visible = true; n.paintable = true;
+    }else{
+      n.visible = false; n.paintable = false; n.paint = null;
+    }
+  }
+}
+
+function applyLevel(li, reset=true){
+  levelIndex = clamp(li, 0, levels.length-1);
+
+  nodes = deepCopyNodes();
+  edges = levels[levelIndex].edges.map(e => [e[0], e[1]]);
+  junctionWinner.clear();
+
+  computeActiveNodeIds();
+  applyVisibilityAndPaintabilityForLevel();
+
+  won = false;
+  winOverlay.style.display = "none";
+  nextBtn.textContent = (levelIndex >= levels.length - 1) ? "Отначало" : "Следващо ниво";
+
+  if(reset) hardResetState();
+
+  applyVisibilityAndPaintabilityForLevel();
+  drawPattern();
+  renderHud();
+}
+
+function advance(){
+  if(levelIndex >= levels.length - 1) applyLevel(0, true);
+  else applyLevel(levelIndex + 1, true);
+}
+
+nextBtn.addEventListener("click", ()=>{ winOverlay.style.display="none"; won = false; advance(); });
+resetBtn.addEventListener("click", ()=>{ winOverlay.style.display="none"; won = false; hardResetState(); applyVisibilityAndPaintabilityForLevel(); });
+
+/* ===================== INIT ===================== */
+applyLevel(0, true);
+renderHud();
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
