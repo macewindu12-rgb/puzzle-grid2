@@ -41,35 +41,39 @@
     -webkit-touch-callout: none;
   }
 
-  /* mobile layout: side panel goes under the game */
-  @media (max-width: 900px){
-    body{
-      flex-direction: column;
-      height: auto;
-      min-height: 100vh;
-    }
-
-    #wrap{
-      align-items: flex-start;
-      width: 100%;
-      padding: 10px;
-      box-sizing: border-box;
-    }
-
-    #side{
-      width: 100%;
-      border-left: none;
-      border-top: 2px solid #2a2a2a;
-      padding: 8px 0 10px;
-      align-items: center;
-    }
-
-    /* pattern smaller on mobile */
-    #pattern{
-      width: 120px;
-      height: 120px;
-    }
+ /* mobile layout: side panel goes under the game */
+@media (max-width: 900px){
+  body{
+    flex-direction: column;
+    height: auto;
+    min-height: 100vh;
   }
+
+  #wrap{
+    flex: 0;                 /* ✅ маха dead space */
+    justify-content: flex-start;
+    align-items: flex-start;
+    width: 100%;
+    padding: 10px;
+    box-sizing: border-box;
+  }
+
+  #side{
+    width: 100%;
+    border-left: none;
+    border-top: 2px solid #2a2a2a;
+    padding: 8px 0 10px;
+    align-items: center;
+    margin-top: 0;
+  }
+
+  /* pattern smaller on mobile */
+  #pattern{
+    width: 120px;
+    height: 120px;
+  }
+}
+
 </style>
 </head>
 
