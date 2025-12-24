@@ -32,7 +32,7 @@
 <body>
   <div id="wrap">
     <div id="hud"></div>
-    <canvas id="cv" width="760" height="600"></canvas>
+<canvas id="cv" width="800" height="600" style="touch-action:none;"></canvas>
 
     <div id="win">
       <div class="card">
@@ -264,7 +264,7 @@ function isNodeAreaBlocked(nodeId, exceptToken=null){
   for(const t of tokens){
     if(t === exceptToken) continue;
     const p = tokenPos(t);
-if(Math.hypot(p.x - n.x, p.y - n.y) <= R) return true;
+    if(Math.hypot(p.x - n.x, p.y - n.y) <= R) return true;
   }
   return false;
 }
@@ -489,10 +489,10 @@ function tryEnterNodeIfClose(tk){
       return;
     }
 
-   tk.lastEdge = { ...tk.edge };
-tk.state = "node";
-tk.atNode = dest;
-tk.edge = null;
+    tk.lastEdge = { ...tk.edge };
+    tk.state = "node";
+    tk.atNode = dest;
+    tk.edge = null;
     tk.u = 0;
     junctionWinner.set(dest, tk.id);
     maybePaintNode(dest, tk.color);
@@ -510,9 +510,9 @@ tk.edge = null;
     }
 
     tk.lastEdge = { ...tk.edge };
-tk.state = "node";
-tk.atNode = dest;
-tk.edge = null;
+    tk.state = "node";
+    tk.atNode = dest;
+    tk.edge = null;
     tk.u = 0;
     junctionWinner.set(dest, tk.id);
     maybePaintNode(dest, tk.color);
@@ -587,32 +587,51 @@ function drawPattern(){
   }
 }
 
-/* ===================== INPUT ===================== */
-let mouseX=0, mouseY=0;
-let activeToken=null;
-let isMouseDown=false;
+/* ===================== INPUT (Pointer Events: mouse+touch+pen) ===================== */
+let mouseX = 0, mouseY = 0;
+let activeToken = null;
+let isPointerDown = false;
+let activePointerId = null;
 
-cv.addEventListener("mousedown", (e)=>{
+function updatePointerPos(e){
+  const r = cv.getBoundingClientRect();
+  mouseX = e.clientX - r.left;
+  mouseY = e.clientY - r.top;
+}
+
+cv.addEventListener("pointerdown", (e)=>{
   if(won) return;
-  const r=cv.getBoundingClientRect();
-  mouseX=e.clientX-r.left;
-  mouseY=e.clientY-r.top;
-  isMouseDown=true;
+
+  // само primary pointer (предотвратява multi-touch хаос)
+  if(!e.isPrimary) return;
+
+  e.preventDefault();
+  cv.focus?.();
+
+  updatePointerPos(e);
+  isPointerDown = true;
+  activePointerId = e.pointerId;
+
+  // capture, за да не губиш drag, ако излезеш извън canvas
+  cv.setPointerCapture?.(e.pointerId);
 
   activeToken = pickToken(mouseX, mouseY);
   if(activeToken) activeToken.dragging = true;
 });
 
-cv.addEventListener("mousemove", (e)=>{
-  const r=cv.getBoundingClientRect();
-  mouseX=e.clientX-r.left;
-  mouseY=e.clientY-r.top;
+cv.addEventListener("pointermove", (e)=>{
+  if(!isPointerDown || won) return;
+  if(activePointerId !== null && e.pointerId !== activePointerId) return;
 
-  if(!isMouseDown || !activeToken || won) return;
+  e.preventDefault();
+  updatePointerPos(e);
+
+  if(!activeToken) return;
 
   if(activeToken.state === "node"){
     const next = chooseNeighborByDirection(activeToken.atNode, mouseX, mouseY);
     if(!next) return;
+
     activeToken.edge = { from: activeToken.atNode, to: next };
     activeToken.atNode = null;
     activeToken.state = "edge";
@@ -630,60 +649,60 @@ cv.addEventListener("mousemove", (e)=>{
       const junction = nearFrom ? activeToken.edge.from : activeToken.edge.to;
 
       const next = chooseNeighborByDirection(junction, mouseX, mouseY);
-     const blocked = isNodeHardOccupied(junction, activeToken) || isNodeAreaBlocked(junction, activeToken);
+      const blocked = isNodeHardOccupied(junction, activeToken) || isNodeAreaBlocked(junction, activeToken);
 
+      if(blocked){
+        triggerShake(activeToken);
 
-if(blocked){
-  // ✅ ключ: когато junction е зает, ЗАБРАНЯВАМЕ auto-switch към друг edge
-  triggerShake(activeToken);
+        // твоя clamp логика (както вече я имаш)
+        const a = byId(activeToken.edge.from);
+        const b = byId(activeToken.edge.to);
+        const len = Math.hypot(b.x - a.x, b.y - a.y) || 1;
 
-  // просто го държим на текущия edge на безопасна дистанция от възела
-  // (не му позволяваме да “влезе” в node-area бариерата)
-  const a = byId(activeToken.edge.from);
-  const b = byId(activeToken.edge.to);
-  const len = Math.hypot(b.x - a.x, b.y - a.y) || 1;
+        const R = TOKEN_R * 2 + NODE_BARRIER_PAD + HARD_BLOCK_PAD;
+        const barrierU = Math.min(0.49, R / len);
 
-  const R = TOKEN_R * 2 + NODE_BARRIER_PAD + HARD_BLOCK_PAD;
-  const barrierU = Math.min(0.49, R / len);
+        if(junction === activeToken.edge.from){
+          activeToken.u = Math.max(activeToken.u, barrierU);
+        }else{
+          activeToken.u = Math.min(activeToken.u, 1 - barrierU);
+        }
+        return;
+      }
 
-  if(junction === activeToken.edge.from){
-    activeToken.u = Math.max(activeToken.u, barrierU);
-  }else{
-    activeToken.u = Math.min(activeToken.u, 1 - barrierU);
-  }
-
-  return;
-}
-
-      maybePaintNode(junction, activeToken.color);
-      checkWin();
-      if(won) return;
-
+      // ако не е blocked, позволи switch към next (ако има)
       if(next){
         activeToken.edge = { from: junction, to: next };
-        activeToken.u = projectU(activeToken.edge, mouseX, mouseY);
+        // ако идваш от "from" край -> старт от малко навън, иначе от другия край
+        activeToken.u = (junction === activeToken.edge.from) ? END_EPS : (1 - END_EPS);
+        return;
       }
     }
   }
 });
 
-cv.addEventListener("mouseup", ()=>{
-  isMouseDown=false;
+function endPointer(e){
+  if(activePointerId !== null && e.pointerId !== activePointerId) return;
+
+  e.preventDefault();
+
   if(activeToken) activeToken.dragging = false;
   activeToken = null;
-});
+  isPointerDown = false;
 
-function pickToken(px,py){
-  let best=null, bestD=Infinity;
-  for(const tk of tokens){
-    const p = tokenPos(tk);
-    const d = Math.hypot(p.x-px, p.y-py);
-    if(d <= PICK_R && d < bestD){
-      bestD=d; best=tk;
-    }
+  if(activePointerId !== null){
+    cv.releasePointerCapture?.(activePointerId);
   }
-  return best;
+  activePointerId = null;
 }
+
+cv.addEventListener("pointerup", endPointer);
+cv.addEventListener("pointercancel", endPointer);
+cv.addEventListener("pointerleave", (e)=>{
+  // на desktop "leave" може да пусне drag-а; на touch pointercapture държи така или иначе
+  if(!isPointerDown) return;
+  endPointer(e);
+});
 
 /* ===================== DRAW ===================== */
 function drawStartNode(n){
@@ -767,7 +786,8 @@ function drawTokens(){
     ctx.beginPath();
     ctx.arc(p.x+sx,p.y+sy,TOKEN_R,0,Math.PI*2);
     ctx.fillStyle = COLORS[tk.color];
-    ctx.globalAlpha = (tk === activeToken && isMouseDown) ? 1 : 0.95;
+    // ✅ FIX: isMouseDown -> isPointerDown (само това е променено)
+    ctx.globalAlpha = (tk === activeToken && isPointerDown) ? 1 : 0.95;
     ctx.fill();
     ctx.globalAlpha = 1;
     ctx.strokeStyle="rgba(0,0,0,0.35)";
@@ -802,15 +822,15 @@ function loop(ts){
   last = ts;
 
   if(!won){
-  enforceEdgeSpacing();
-  applyNodeAreaBarriers();
-  applyJunctionCongestion();
+    enforceEdgeSpacing();
+    applyNodeAreaBarriers();
+    applyJunctionCongestion();
 
-  for(const tk of tokens){
-    tryEnterNodeIfClose(tk);
-    if(tk.shakeT > 0) tk.shakeT = Math.max(0, tk.shakeT - dt);
+    for(const tk of tokens){
+      tryEnterNodeIfClose(tk);
+      if(tk.shakeT > 0) tk.shakeT = Math.max(0, tk.shakeT - dt);
+    }
   }
-}
 
   draw();
   requestAnimationFrame(loop);
@@ -852,7 +872,9 @@ function hardResetState(){
 function computeActiveNodeIds(){
   activeNodeIds = new Set();
   for(const [a,b] of edges){ activeNodeIds.add(a); activeNodeIds.add(b); }
-  activeNodeIds.add("A"); activeNodeIds.add("B"); activeNodeIds.add("C");
+  activeNodeIds.add("A");
+  activeNodeIds.add("B");
+  activeNodeIds.add("C");
 }
 
 function applyVisibilityAndPaintabilityForLevel(){
@@ -903,6 +925,16 @@ function advance(){
 nextBtn.addEventListener("click", ()=>{ winOverlay.style.display="none"; won = false; advance(); });
 resetBtn.addEventListener("click", ()=>{ winOverlay.style.display="none"; won = false; hardResetState(); applyVisibilityAndPaintabilityForLevel(); });
 
+/* ===================== pickToken (needed by pointerdown) ===================== */
+function pickToken(x, y){
+  for(let i=tokens.length-1; i>=0; i--){
+    const tk = tokens[i];
+    const p = tokenPos(tk);
+    if(Math.hypot(p.x-x, p.y-y) <= PICK_R) return tk;
+  }
+  return null;
+}
+
 /* ===================== INIT ===================== */
 applyLevel(0, true);
 renderHud();
@@ -910,3 +942,4 @@ requestAnimationFrame(loop);
 </script>
 </body>
 </html>
+
