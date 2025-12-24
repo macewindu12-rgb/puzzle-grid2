@@ -32,6 +32,9 @@
   height: auto;
 }
 
+#cv{ width:100%; max-width:800px; }
+
+
 /* mobile layout: side panel goes under the game */
 @media (max-width: 900px){
   body{
@@ -39,6 +42,9 @@
     height: auto;
     min-height: 100vh;
   }
+
+#wrap{ align-items: flex-start; }
+
 
   #wrap{
     width: 100%;
@@ -630,8 +636,13 @@ let activePointerId = null;
 
 function updatePointerPos(e){
   const r = cv.getBoundingClientRect();
-  mouseX = e.clientX - r.left;
-  mouseY = e.clientY - r.top;
+
+  // CSS pixels -> canvas internal pixels (800x600)
+  const scaleX = cv.width  / r.width;
+  const scaleY = cv.height / r.height;
+
+  mouseX = (e.clientX - r.left) * scaleX;
+  mouseY = (e.clientY - r.top)  * scaleY;
 }
 
 cv.addEventListener("pointerdown", (e)=>{
